@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Laboratorio de render · Ray Tracing (Integrante 2)</title>
+<style>
+  body{margin:0;background:#111;color:#eee;font-family:system-ui,sans-serif;display:flex;gap:16px;padding:16px;flex-wrap:wrap}
+  canvas{background:#000;image-rendering:pixelated;width:640px;height:400px;border:1px solid #444}
+  #panel{max-width:360px;line-height:1.5}
+  kbd{background:#333;border:1px solid #555;border-radius:3px;padding:0 5px}
+  table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #444;padding:2px 6px}
+  .ok{color:#7f7}
+</style>
+</head>
+<body>
+<canvas id="c" width="320" height="200"></canvas>
+<div id="panel">
+  <h3>Laboratorio de render - Ray Tracing</h3>
+  <p><kbd>2</kbd> Ray Tracing (Tu parte)</p>
+  <p><kbd>S</kbd> sombras on/off</p>
+  <p id="info"></p>
+  <table id="tabla"><tr><th>Modo</th><th>Res.</th><th>ms</th></tr></table>
+</div>
+<script>
+// ====== ESCENA BASE COMPARTIDA (Esferas, Cilindro, Piso, Luz) ======
+const escena = {
+  esferas: [
+    { c:[ 0.0, 0.0, 5.0], r:1.0, color:[1.0,0.3,0.3], especular: 0.5 },
+    { c:[-2.2, 0.3, 6.5], r:1.3, color:[0.3,1.0,0.4], especular: 0.2 }
+  ],
+  cilindro: { c:[ 2.0, -0.2, 4.5], r:0.7, h:1.8, color:[0.2,0.6,1.0], especular: 0.4 },
+  pisoY: -1.0,
+  luz: norm([-1, 2, -1.5]) // Dirección HACIA la luz
+};
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let sombras = true;
+
+// ====== Vectores ======
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function add(a,b){return [a[0]+b[0],a[1]+b[1],a[2]+b[2]];}
+function mul(a,s){return [a[0]*s,a[1]*s,a[2]*s];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function norm(a){const l=Math.hypot(a[0],a[1],a[2]);return [a[0]/l,a[1]/l,a[2]/l];}
+
+// ====== INTERSECCIONES RAY TRACING ======
+function intersectaEsfera(o, d, e){
+  const oc = sub(o, e.c);
+  const b = dot(d, oc);
+  const k = dot(oc, oc) - e.r * e.r;
+  const disc = b * b - k;
+  if (disc < 0) return Infinity;
+  let t = -b - Math.sqrt(disc);
+  if (t < 0) t = -b + Math.sqrt(disc);
+  return t > 0.001 ? t : Infinity;
+}
+
+function intersectaCilindro(o, d, cil) {
+  let mejorT = Infinity;
+  let normal = [0, 1, 0];
+
+  // 1. Cuerpo del cilindro (plano XZ)
+  const ocx = o[0] - cil.c[0];
+  const ocz = o[2] - cil.c[2];
+  const dx = d[0], dz = d[2];
+
+  const a = dx * dx + dz * dz;
+  if (Math.abs(a) > 1e-6) {
+    const b = ocx * dx + ocz * dz;
+    const c = ocx * ocx + ocz * ocz - cil.r * cil.r;
+    const disc = b * b - a * c;
+
+    if (disc >= 0) {
+      const sqrtDisc = Math.sqrt(disc);
+      let t1 = (-b - sqrtDisc) / a;
+      let t2 = (-b + sqrtDisc) / a;
+
+      for (let t of [t1, t2]) {
+        if (t > 0.001 && t < mejorT) {
+          const py = o[1] + t * d[1];
+          if (py >= cil.c[1] - cil.h/2 && py <= cil.c[1] + cil.h/2) {
+            mejorT = t;
+            const px = o[0] + t * d[0];
+            const pz = o[2] + t * d[2];
+            normal = norm([px - cil.c[0], 0, pz - cil.c[2]]);
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Tapas superior e inferior
+  const yMin = cil.c[1] - cil.h/2;
+  const yMax = cil.c[1] + cil.h/2;
+
+  for (let [yPlano, nPlano] of [[yMin, [0,-1,0]], [yMax, [0,1,0]]]) {
+    if (Math.abs(d[1]) > 1e-6) {
+      const tPlano = (yPlano - o[1]) / d[1];
+      if (tPlano > 0.001 && tPlano < mejorT) {
+        const px = o[0] + tPlano * d[0];
+        const pz = o[2] + tPlano * d[2];
+        if (Math.hypot(px - cil.c[0], pz - cil.c[2]) <= cil.r) {
+          mejorT = tPlano;
+          normal = nPlano;
+        }
+      }
+    }
+  }
+
+  return { t: mejorT, n: normal };
+}
+
+function intersectaPiso(o, d){
+  if (Math.abs(d[1]) < 1e-6) return Infinity;
+  const t = (escena.pisoY - o[1]) / d[1];
+  return t > 1e-3 ? t : Infinity;
+}
+
+// Devuelve el objeto o geometría más cercana impactada por el rayo
+function trazar(o, d){
+  let mejor = { t: Infinity };
+  
+  for (const e of escena.esferas){
+    const t = intersectaEsfera(o, d, e);
+    if (t < mejor.t){ 
+      const p = add(o, mul(d,t)); 
+      mejor = { t, p, n: norm(sub(p, e.c)), color: e.color, especular: e.especular }; 
+    }
+  }
+
+  const resCil = intersectaCilindro(o, d, escena.cilindro);
+  if (resCil.t < mejor.t) {
+    const p = add(o, mul(d, resCil.t));
+    mejor = { t: resCil.t, p, n: resCil.n, color: escena.cilindro.color, especular: escena.cilindro.especular };
+  }
+
+  const tp = intersectaPiso(o, d);
+  if (tp < mejor.t){
+    const p = add(o, mul(d,tp));
+    const cuadro = (Math.floor(p[0]) + Math.floor(p[2])) & 1;
+    mejor = { t: tp, p, n:[0,1,0], color: cuadro ? [0.8,0.8,0.8] : [0.35,0.35,0.35], especular: 0.1 };
+  }
+  return mejor;
+}
+
+// ====== SOMBRAS Y REFLEJOS ESPECULARES ======
+function enSombra(p, n){
+  const d = escena.luz;
+  const h = trazar(add(p, mul(n, 0.001)), d);
+  return h.t < Infinity;
+}
+
+function sombrear(h){
+  if (h.t === Infinity) return [0.15, 0.2, 0.35];   // Color cielo de fondo
+  
+  let lambert = Math.max(0, dot(h.n, escena.luz));
+  if (sombras && lambert > 0 && enSombra(h.p, h.n)) lambert = 0;
+  
+  // Iluminación ambiental y difusa básica
+  let colorFinal = mul(h.color, 0.25 + 0.75 * lambert);
+
+  // Cálculo del Reflejo Especular (Un rebote de luz)
+  if (h.especular > 0) {
+    // Vector de reflexión: R = D - 2(D · N)N
+    const dLuzReflejo = sub(escena.luz, mul(h.n, 2 * dot(escena.luz, h.n)));
+    const hReflejo = trazar(add(h.p, mul(h.n, 0.001)), norm(dLuzReflejo));
+    
+    if (hReflejo.t !== Infinity) {
+      const reflejoColor = mul(hReflejo.color, 0.5);
+      colorFinal = add(colorFinal, mul(reflejoColor, h.especular));
+    }
+  }
+
+  return colorFinal;
+}
+
+// ====== RAY TRACING: Lanzamiento de rayos primarios ======
+function renderRayTracing(){
+  const W = cv.width, H = cv.height, img = ctx.createImageData(W, H);
+  const ojo = [0, 0.3, 0], fov = 1.0;
+  
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++){
+      const u = (2*(x+0.5)/W - 1) * fov * W/H;
+      const v = (1 - 2*(y+0.5)/H) * fov;
+      const col = sombrear(trazar(ojo, norm([u, v, 1.5])));
+      
+      const i = 4*(y*W + x);
+      img.data[i]   = Math.min(255, col[0]*255);
+      img.data[i+1] = Math.min(255, col[1]*255);
+      img.data[i+2] = Math.min(255, col[2]*255);
+      img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ====== Ejecución y Medición (Integrante 2) ======
+function render(){
+  const t0 = performance.now();
+  renderRayTracing();
+  const ms = (performance.now() - t0).toFixed(1);
+  
+  document.getElementById('info').innerHTML =
+    `<b>Ray Tracing</b> · ${cv.width}×${cv.height} · sombras: ${sombras?'sí':'no'} · <span class="ok">${ms} ms</span>`;
+  document.getElementById('tabla').innerHTML =
+    `<tr><th>Modo</th><th>Res.</th><th>ms</th></tr><tr><td>Ray Tracing</td><td>${cv.width}×${cv.height}</td><td>${ms}</td></tr>`;
+}
+
+render();
+</script>
+</body>
+</html>
