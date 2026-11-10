@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Laboratorio de render · Oclusión Ambiental (Integrante 3)</title>
+<style>
+  body{margin:0;background:#111;color:#eee;font-family:system-ui,sans-serif;display:flex;gap:16px;padding:16px;flex-wrap:wrap}
+  canvas{background:#000;image-rendering:pixelated;width:640px;height:400px;border:1px solid #444}
+  #panel{max-width:360px;line-height:1.5}
+  kbd{background:#333;border:1px solid #555;border-radius:3px;padding:0 5px}
+  table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #444;padding:2px 6px}
+  .ok{color:#7f7}
+</style>
+</head>
+<body>
+<canvas id="c" width="320" height="200"></canvas>
+<div id="panel">
+  <h3>Laboratorio de render - Oclusión Ambiental</h3>
+  <p><kbd>3</kbd> Ray Tracing + AO (Tu parte)</p>
+  <p><kbd>+</kbd>/<kbd>-</kbd> ajustar muestras de AO</p>
+  <p id="info"></p>
+  <table id="tabla"><tr><th>Modo</th><th>Res.</th><th>AO</th><th>ms</th></tr></table>
+</div>
+<script>
+// ====== ESCENA BASE COMPARTIDA (Esferas, Cilindro, Piso, Luz) ======
+const escena = {
+  esferas: [
+    { c:[ 0.0, 0.0, 5.0], r:1.0, color:[1.0,0.3,0.3] },
+    { c:[-2.2, 0.3, 6.5], r:1.3, color:[0.3,1.0,0.4] }
+  ],
+  cilindro: { c:[ 2.0, -0.2, 4.5], r:0.7, h:1.8, color:[0.2,0.6,1.0] },
+  pisoY: -1.0,
+  luz: norm([-1, 2, -1.5]) // Dirección HACIA la luz
+};
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let muestrasAO = 16; // Número inicial de muestras hemisféricas de AO
+
+// ====== Vectores ======
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function add(a,b){return [a[0]+b[0],a[1]+b[1],a[2]+b[2]];}
+function mul(a,s){return [a[0]*s,a[1]*s,a[2]*s];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function norm(a){const l=Math.hypot(a[0],a[1],a[2]);return [a[0]/l,a[1]/l,a[2]/l];}
+
+// ====== INTERSECCIONES GEOMÉTRICAS ======
+function intersectaEsfera(o, d, e){
+  const oc = sub(o, e.c);
+  const b = dot(d, oc);
+  const k = dot(oc, oc) - e.r * e.r;
+  const disc = b * b - k;
+  if (disc < 0) return Infinity;
+  let t = -b - Math.sqrt(disc);
+  if (t < 0) t = -b + Math.sqrt(disc);
+  return t > 0.001 ? t : Infinity;
+}
+
+function intersectaCilindro(o, d, cil) {
+  let mejorT = Infinity;
+  let normal = [0, 1, 0];
+
+  const ocx = o[0] - cil.c[0];
+  const ocz = o[2] - cil.c[2];
+  const dx = d[0], dz = d[2];
+  const a = dx * dx + dz * dz;
+
+  if (Math.abs(a) > 1e-6) {
+    const b = ocx * dx + ocz * dz;
+    const c = ocx * ocx + ocz * ocz - cil.r * cil.r;
+    const disc = b * b - a * c;
+
+    if (disc >= 0) {
+      const sqrtDisc = Math.sqrt(disc);
+      let t1 = (-b - sqrtDisc) / a;
+      let t2 = (-b + sqrtDisc) / a;
+
+      for (let t of [t1, t2]) {
+        if (t > 0.001 && t < mejorT) {
+          const py = o[1] + t * d[1];
+          if (py >= cil.c[1] - cil.h/2 && py <= cil.c[1] + cil.h/2) {
+            mejorT = t;
+            const px = o[0] + t * d[0];
+            const pz = o[2] + t * d[2];
+            normal = norm([px - cil.c[0], 0, pz - cil.c[2]]);
+          }
+        }
+      }
+    }
+  }
+
+  const yMin = cil.c[1] - cil.h/2;
+  const yMax = cil.c[1] + cil.h/2;
+
+  for (let [yPlano, nPlano] of [[yMin, [0,-1,0]], [yMax, [0,1,0]]]) {
+    if (Math.abs(d[1]) > 1e-6) {
+      const tPlano = (yPlano - o[1]) / d[1];
+      if (tPlano > 0.001 && tPlano < mejorT) {
+        const px = o[0] + tPlano * d[0];
+        const pz = o[2] + tPlano * d[2];
+        if (Math.hypot(px - cil.c[0], pz - cil.c[2]) <= cil.r) {
+          mejorT = tPlano;
+          normal = nPlano;
+        }
+      }
+    }
+  }
+
+  return { t: mejorT, n: normal };
+}
+
+function intersectaPiso(o, d){
+  if (Math.abs(d[1]) < 1e-6) return Infinity;
+  const t = (escena.pisoY - o[1]) / d[1];
+  return t > 1e-3 ? t : Infinity;
+}
+
+function trazar(o, d){
+  let mejor = { t: Infinity };
+  
+  for (const e of escena.esferas){
+    const t = intersectaEsfera(o, d, e);
+    if (t < mejor.t){ const p = add(o, mul(d,t)); mejor = { t, p, n: norm(sub(p, e.c)), color: e.color }; }
+  }
+
+  const resCil = intersectaCilindro(o, d, escena.cilindro);
+  if (resCil.t < mejor.t) {
+    const p = add(o, mul(d, resCil.t));
+    mejor = { t: resCil.t, p, n: resCil.n, color: escena.cilindro.color };
+  }
+
+  const tp = intersectaPiso(o, d);
+  if (tp < mejor.t){
+    const p = add(o, mul(d,tp));
+    const cuadro = (Math.floor(p[0]) + Math.floor(p[2])) & 1;
+    mejor = { t: tp, p, n:[0,1,0], color: cuadro ? [0.8,0.8,0.8] : [0.35,0.35,0.35] };
+  }
+  return mejor;
+}
+
+// ====== NIVEL 3: OCLUSIÓN AMBIENTAL (Ambient Occlusion) ======
+// Lanza N rayos al azar en el hemisferio de la normal y cuenta cuántos salen libres
+function oclusionAmbiental(p, n, N){
+  let libres = 0;
+  for (let i = 0; i < N; i++){
+    // Generar dirección aleatoria en todas las direcciones
+    const d = norm([Math.random()*2-1, Math.random()*2-1, Math.random()*2-1]);  
+    // Asegurar que la dirección esté en el hemisferio de la normal (si apunta hacia adentro, invertirla)
+    if (dot(d, n) < 0) { d[0] *= -1; d[1] *= -1; d[2] *= -1; }
+    
+    // Lanzar rayo de prueba desde el punto ligeramente desplazado
+    const h = trazar(add(p, mul(n, 0.001)), d);
+    // Si el rayo recorre más de cierta distancia sin chocar, se considera libre
+    if (h.t > 2.0) libres++;
+  }
+  // Regresa el factor de oclusión (1 = sin oclusión, 0 = rincón completamente tapado)
+  return libres / N;
+}
+
+function sombrear(h, conAO){
+  if (h.t === Infinity) return [0.15, 0.2, 0.35];   // Color cielo
+  let lambert = Math.max(0, dot(h.n, escena.luz));
+  
+  // Calcular componente ambiental afectada por la oclusión ambiental (AO)
+  const factorAO = conAO ? oclusionAmbiental(h.p, h.n, muestrasAO) : 1;
+  const amb = 0.25 * factorAO;
+  
+  return mul(h.color, amb + 0.75 * lambert);
+}
+
+// ====== RENDERIZADO CON OCLUSIÓN AMBIENTAL ======
+function renderRayTracingAO(){
+  const W = cv.width, H = cv.height, img = ctx.createImageData(W, H);
+  const ojo = [0, 0.3, 0], fov = 1.0;
+  
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++){
+      const u = (2*(x+0.5)/W - 1) * fov * W/H;
+      const v = (1 - 2*(y+0.5)/H) * fov;
+      const col = sombrear(trazar(ojo, norm([u, v, 1.5])), true);
+      
+      const i = 4*(y*W + x);
+      img.data[i]   = Math.min(255, col[0]*255);
+      img.data[i+1] = Math.min(255, col[1]*255);
+      img.data[i+2] = Math.min(255, col[2]*255);
+      img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ====== Ejecución, Medición e Interactividad (Integrante 3) ======
+function render(){
+  const t0 = performance.now();
+  renderRayTracingAO();
+  const ms = (performance.now() - t0).toFixed(1);
+  
+  document.getElementById('info').innerHTML =
+    `<b>Ray Tracing + AO</b> · ${cv.width}×${cv.height} · muestras: ${muestrasAO} · <span class="ok">${ms} ms</span>`;
+  document.getElementById('tabla').innerHTML =
+    `<tr><th>Modo</th><th>Res.</th><th>AO</th><th>ms</th></tr><tr><td>Ray Tracing + AO</td><td>${cv.width}×${cv.height}</td><td>${muestrasAO}</td><td>${ms}</td></tr>`;
+}
+
+// Control interactivo de muestras con las teclas + y -
+addEventListener('keydown', ev => {
+  if (ev.key === '+') muestrasAO = Math.min(128, muestrasAO * 2);
+  else if (ev.key === '-') muestrasAO = Math.max(1, muestrasAO / 2);
+  else return;
+  render();
+});
+
+render();
+</script>
+</body>
+</html>
