@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Laboratorio de render · Scanline (Integrante 1)</title>
+<style>
+  body{margin:0;background:#111;color:#eee;font-family:system-ui,sans-serif;display:flex;gap:16px;padding:16px;flex-wrap:wrap}
+  canvas{background:#000;image-rendering:pixelated;width:640px;height:400px;border:1px solid #444}
+  #panel{max-width:360px;line-height:1.5}
+  kbd{background:#333;border:1px solid #555;border-radius:3px;padding:0 5px}
+  table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #444;padding:2px 6px}
+  .ok{color:#7f7}
+</style>
+</head>
+<body>
+<canvas id="c" width="320" height="200"></canvas>
+<div id="panel">
+  <h3>Laboratorio de render - Scanline</h3>
+  <p><kbd>1</kbd> Scanline (Tu parte)</p>
+  <p id="info"></p>
+  <table id="tabla"><tr><th>Modo</th><th>Res.</th><th>ms</th></tr></table>
+</div>
+<script>
+// ====== ESCENA BASE COMPARTIDA (Esferas, Cilindro, Piso, Luz) ======
+const escena = {
+  esferas: [
+    { c:[ 0.0, 0.0, 5.0], r:1.0, color:[1.0,0.3,0.3] },
+    { c:[-2.2, 0.3, 6.5], r:1.3, color:[0.3,1.0,0.4] }
+  ],
+  cilindro: { c:[ 2.0, -0.2, 4.5], r:0.7, h:1.8, color:[0.2,0.6,1.0] },
+  pisoY: -1.0,
+  luz: norm([-1, 2, -1.5]) // Dirección HACIA la luz
+};
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+
+// ====== Vectores ======
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function add(a,b){return [a[0]+b[0],a[1]+b[1],a[2]+b[2]];}
+function mul(a,s){return [a[0]*s,a[1]*s,a[2]*s];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function norm(a){const l=Math.hypot(a[0],a[1],a[2]);return [a[0]/l,a[1]/l,a[2]/l];}
+
+// ====== SCANLINE: Rasterización con Z-Buffer y Sombreado Plano ======
+function renderScanline(){
+  const W = cv.width, H = cv.height, img = ctx.createImageData(W, H);
+  const zbuf = new Float32Array(W*H).fill(Infinity);
+  const ojo = [0, 0.3, 0], f = 1.5 / 1.0;
+  
+  const pix = (x,y,col) => {
+    const i = 4*(y*W+x);
+    img.data[i] = col[0]*255;
+    img.data[i+1] = col[1]*255;
+    img.data[i+2] = col[2]*255;
+    img.data[i+3] = 255;
+  };
+  
+  // 1. Renderizar fondo y piso por scanline (renglón por renglón)
+  for (let y = 0; y < H; y++){
+    const v = 1 - 2*(y+0.5)/H;
+    for (let x = 0; x < W; x++) pix(x, y, [0.15,0.2,0.35]); // Cielo
+    if (v < 0){
+      const z = (escena.pisoY - ojo[1]) / (v / f);
+      for (let x = 0; x < W; x++){
+        const u = (2*(x+0.5)/W - 1) * W/H;
+        const px = u / f * z, cuadro = (Math.floor(px) + Math.floor(z)) & 1;
+        const c = cuadro ? 0.8 : 0.35, l = 0.25 + 0.75*Math.max(0, escena.luz[1]);
+        pix(x, y, [c*l, c*l, c*l]); 
+        zbuf[y*W+x] = z;
+      }
+    }
+  }
+
+  // 2. Renderizar esferas mediante proyección y spans horizontales con Z-Buffer
+  for (const e of escena.esferas){
+    const z = e.c[2], cx = (e.c[0]/z*f) / (W/H), cy = (e.c[1]-ojo[1])/z*f, rr = e.r/z*f;
+    const sx = (cx+1)/2*W, sy = (1-cy)/2*H, sr = rr/2*H;
+    for (let y = Math.max(0, Math.floor(sy-sr)); y < Math.min(H, Math.ceil(sy+sr)); y++){
+      const dy = (y+0.5 - sy)/sr; if (Math.abs(dy) > 1) continue;
+      const half = Math.sqrt(1 - dy*dy) * sr;
+      for (let x = Math.max(0, Math.floor(sx-half)); x < Math.min(W, Math.ceil(sx+half)); x++){
+        const dx = (x+0.5 - sx)/sr, nz = -Math.sqrt(Math.max(0, 1-dx*dx-dy*dy));
+        const zp = z + nz*e.r;
+        if (zp < zbuf[y*W+x]){
+          zbuf[y*W+x] = zp;
+          const n = [dx, -dy, nz], l = 0.25 + 0.75*Math.max(0, dot(n, escena.luz));
+          pix(x, y, mul(e.color, l));
+        }
+      }
+    }
+  }
+
+  // 3. Renderizar el cilindro usando rasterización geométrica y z-buffer
+  const cil = escena.cilindro;
+  const zc = cil.c[2], cx = (cil.c[0]/zc*f) / (W/H), cy = (cil.c[1]-ojo[1])/zc*f;
+  const rw = cil.r/zc*f, rh = (cil.h/2)/zc*f;
+  const sx = (cx+1)/2*W, sy = (1-cy)/2*H, srw = rw/2*W, srh = rh/2*H;
+  
+  for (let y = Math.max(0, Math.floor(sy-srh)); y < Math.min(H, Math.ceil(sy+srh)); y++){
+    for (let x = Math.max(0, Math.floor(sx-srw)); x < Math.min(W, Math.ceil(sx+srw)); x++){
+      const zp = zc;
+      if (zp < zbuf[y*W+x]){
+        zbuf[y*W+x] = zp;
+        const l = 0.25 + 0.75*Math.max(0, escena.luz[1]);
+        pix(x, y, mul(cil.color, l));
+      }
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+}
+
+// ====== Ejecución y Medición (Integrante 1) ======
+function render(){
+  const t0 = performance.now();
+  renderScanline();
+  const ms = (performance.now() - t0).toFixed(1);
+  
+  document.getElementById('info').innerHTML =
+    `<b>Scanline</b> · ${cv.width}×${cv.height} · <span class="ok">${ms} ms</span>`;
+  document.getElementById('tabla').innerHTML =
+    `<tr><th>Modo</th><th>Res.</th><th>ms</th></tr><tr><td>Scanline</td><td>${cv.width}×${cv.height}</td><td>${ms}</td></tr>`;
+}
+
+render();
+</script>
+</body>
+</html>
